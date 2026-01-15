@@ -1,0 +1,20 @@
+# 基于官方 Frappe v16 镜像
+FROM frappe/erpnext:v16
+
+# 切换到 root 用户安装系统包
+USER root
+
+# 使用阿里云镜像源加速
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
+
+# 安装 Insights 依赖所需的系统包
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libmariadb-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# 切换回 frappe 用户
+USER frappe

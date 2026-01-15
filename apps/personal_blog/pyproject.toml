@@ -1,0 +1,19 @@
+[project]
+name = "personal_blog"
+authors = [
+    { name = "Your Name", email = "your@email.com"}
+]
+description = "Personal Blog System built with Frappe and Vue"
+requires-python = ">=3.10"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    "python-slugify>=8.0.0",
+]
+
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.flit.module]
+name = "personal_blog"

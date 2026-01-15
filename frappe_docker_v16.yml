@@ -1,0 +1,336 @@
+# =============================================================================
+# Frappe v16 Docker Compose - 开发环境配置
+# =============================================================================
+# 用途: 本地开发环境，支持代码热更新
+# 访问: http://localhost:8080
+# 默认账号: Administrator / admin
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# YAML 锚点定义 (复用配置)
+# -----------------------------------------------------------------------------
+
+# 自定义镜像配置
+x-customizable-image: &customizable_image
+  image: frappe-custom:v16
+  build:
+    context: .
+    dockerfile: Dockerfile.custom
+
+# 后端服务通用配置
+x-backend-defaults: &backend_defaults
+  <<: *customizable_image
+  networks:
+    - frappe_network
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+  volumes:
+    # Docker 管理卷
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+    # 本地应用代码挂载 (开发模式)
+    - ./apps/frappe:/home/frappe/frappe-bench/apps/frappe
+    - ./apps/product_sales_planning:/home/frappe/frappe-bench/apps/product_sales_planning
+    - ./apps/personal_blog:/home/frappe/frappe-bench/apps/personal_blog
+
+# -----------------------------------------------------------------------------
+# 服务定义
+# -----------------------------------------------------------------------------
+services:
+
+  # ===========================================================================
+  # 核心服务
+  # ===========================================================================
+
+  # Gunicorn 后端服务 - 处理 HTTP 请求
+  backend:
+    <<: *backend_defaults
+    deploy:
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 4G
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        # 安装自定义应用 Python 包
+        /home/frappe/frappe-bench/env/bin/pip install -q -e /home/frappe/frappe-bench/apps/product_sales_planning 2>/dev/null || true
+        /home/frappe/frappe-bench/env/bin/pip install -q -e /home/frappe/frappe-bench/apps/personal_blog 2>/dev/null || true
+        # 启动 Gunicorn
+        exec /home/frappe/frappe-bench/env/bin/gunicorn \
+          --chdir=/home/frappe/frappe-bench/sites \
+          --bind=0.0.0.0:8000 \
+          --workers=4 \
+          --timeout=120 \
+          --worker-tmp-dir=/dev/shm \
+          --worker-class=gthread \
+          --threads=4 \
+          --log-level=info \
+          frappe.app:application
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -H 'Host: mysite.local' http://localhost:8000/api/method/frappe.ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # Nginx 前端服务 - 静态资源和反向代理
+  frontend:
+    <<: *customizable_image
+    networks:
+      - frappe_network
+    depends_on:
+      backend:
+        condition: service_healthy
+      websocket:
+        condition: service_started
+    deploy:
+      restart_policy:
+        condition: on-failure
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        # 创建自定义应用静态资源符号链接
+        for app in product_sales_planning personal_blog; do
+          target="/home/frappe/frappe-bench/sites/assets/$$app"
+          source="/home/frappe/frappe-bench/apps/$$app/$$app/public"
+          if [ ! -L "$$target" ] && [ -d "$$source" ]; then
+            rm -rf "$$target" 2>/dev/null || true
+            ln -sf "$$source" "$$target"
+          fi
+        done
+        exec nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: mysite.local
+      PROXY_READ_TIMEOUT: "120"
+      CLIENT_MAX_BODY_SIZE: "100m"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - ./apps/frappe:/home/frappe/frappe-bench/apps/frappe:ro
+      - ./apps/product_sales_planning:/home/frappe/frappe-bench/apps/product_sales_planning:ro
+      - ./apps/personal_blog:/home/frappe/frappe-bench/apps/personal_blog:ro
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # WebSocket 服务 - 实时通信
+  websocket:
+    <<: *customizable_image
+    networks:
+      - frappe_network
+    deploy:
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 512M
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - ./apps/frappe:/home/frappe/frappe-bench/apps/frappe:ro
+    ports:
+      - "9000:9000"
+
+  # ===========================================================================
+  # 后台任务服务
+  # ===========================================================================
+
+  # 任务调度器 - 定时任务触发
+  scheduler:
+    <<: *backend_defaults
+    deploy:
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 512M
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        /home/frappe/frappe-bench/env/bin/pip install -q -e /home/frappe/frappe-bench/apps/product_sales_planning 2>/dev/null || true
+        /home/frappe/frappe-bench/env/bin/pip install -q -e /home/frappe/frappe-bench/apps/personal_blog 2>/dev/null || true
+        exec bench schedule
+
+  # 队列工作进程 - 处理后台任务
+  worker:
+    <<: *backend_defaults
+    deploy:
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 1G
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        /home/frappe/frappe-bench/env/bin/pip install -q -e /home/frappe/frappe-bench/apps/product_sales_planning 2>/dev/null || true
+        /home/frappe/frappe-bench/env/bin/pip install -q -e /home/frappe/frappe-bench/apps/personal_blog 2>/dev/null || true
+        exec bench worker --queue long,default,short
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+
+  # ===========================================================================
+  # 数据存储服务
+  # ===========================================================================
+
+  # MariaDB 数据库
+  db:
+    image: mariadb:11.8
+    networks:
+      - frappe_network
+    deploy:
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 2G
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --innodb-buffer-pool-size=1G
+      - --innodb-log-file-size=256M
+      - --innodb-flush-log-at-trx-commit=2
+      - --innodb-flush-method=O_DIRECT
+      - --max-connections=500
+    environment:
+      MARIADB_ROOT_PASSWORD: frappe123
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mariadb", "-uroot", "-pfrappe123", "-e", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+
+  # Redis 缓存
+  redis-cache:
+    image: valkey/valkey:8-alpine
+    networks:
+      - frappe_network
+    deploy:
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 512M
+    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Redis 队列
+  redis-queue:
+    image: valkey/valkey:8-alpine
+    networks:
+      - frappe_network
+    deploy:
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 512M
+    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    volumes:
+      - redis-queue-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 初始化服务 (一次性运行)
+  # ===========================================================================
+
+  # 配置初始化 - 生成 common_site_config.json
+  configurator:
+    <<: *customizable_image
+    networks:
+      - frappe_network
+    deploy:
+      restart_policy:
+        condition: none
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        bench set-config -g db_host db
+        bench set-config -gp db_port 3306
+        bench set-config -g redis_cache "redis://redis-cache:6379"
+        bench set-config -g redis_queue "redis://redis-queue:6379"
+        bench set-config -g redis_socketio "redis://redis-queue:6379"
+        bench set-config -gp socketio_port 9000
+        echo "Configuration complete"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  # 站点创建 - 首次运行时创建站点 (手动执行: docker compose run --rm create-site)
+  create-site:
+    <<: *customizable_image
+    networks:
+      - frappe_network
+    profiles: ["setup"]
+    deploy:
+      restart_policy:
+        condition: none
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        wait-for-it -t 120 db:3306
+        wait-for-it -t 120 redis-cache:6379
+        wait-for-it -t 120 redis-queue:6379
+        # 等待配置文件就绪
+        until [ -f sites/common_site_config.json ]; do
+          echo "Waiting for common_site_config.json..."
+          sleep 2
+        done
+        # 创建站点
+        if [ ! -d "sites/mysite.local" ]; then
+          bench new-site \
+            --mariadb-user-host-login-scope='%' \
+            --admin-password=admin \
+            --db-root-username=root \
+            --db-root-password=frappe123 \
+            --set-default \
+            mysite.local
+        else
+          echo "Site mysite.local already exists"
+        fi
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+# -----------------------------------------------------------------------------
+# 数据卷
+# -----------------------------------------------------------------------------
+volumes:
+  db-data:        # MariaDB 数据
+  redis-queue-data:  # Redis 队列持久化
+  sites:          # Frappe 站点数据
+  logs:           # 日志文件
+
+# -----------------------------------------------------------------------------
+# 网络
+# -----------------------------------------------------------------------------
+networks:
+  frappe_network:
+    driver: bridge

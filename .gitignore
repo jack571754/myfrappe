@@ -1,0 +1,61 @@
+# Frappe Bench specific
+env/
+logs/
+config/pids/
+sites/*/private/backups/
+sites/*/private/files/
+sites/*/public/files/
+sites/*/logs/
+sites/*/locks/
+sites/*/indexes/
+sites/*/*.json
+!sites/common_site_config.json
+sites/assets/
+
+# Node modules
+node_modules/
+
+# Python
+*.pyc
+*.py~
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+.Python
+dist/
+build/
+*.so
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Cache
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# Kiro
+.kiro/
+
+# Temporary files
+*.tmp
+*.bak
